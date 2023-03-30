@@ -379,7 +379,13 @@ resolveRelocations mem toConcrete insnAddr ii AnnotatedOperand { aoOperand = (v,
                                                        , "   to " ++ show (toConcrete symAddr)
                                                        ]
           | otherwise -> mkUnitAnnot (D.JumpOffset D.JSize32 (D.FixedOffset (fromIntegral correctedOffset)), D.OpType D.JumpImmediate D.ZSize)
-        _ -> mkUnitAnnot (v, ty)
+        _ 
+          | Just v' <- mapAddrRef (absToRip mem insnAddr (XI ii) (toConcrete symAddr)) (const Nothing) v ->
+            mkUnitAnnot (v', ty)
+          | otherwise ->
+            RP.panic RP.X86_64ISA "resolveRelocations" [ "Unexpected relocation on operand: " ++ show (symAddr, v)
+                                                       , "  in instruction " ++ show ii
+                                                       ]
 
 -- | Update operands that have an 'AbsoluteAddress' annotation, but that are not memory operands
 --
