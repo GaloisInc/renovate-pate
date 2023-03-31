@@ -39,7 +39,7 @@ import           Data.Int ( Int32 )
 import qualified Data.List.NonEmpty as DLN
 import qualified Prettyprinter as PP
 import           Data.Typeable ( Typeable )
-import           Data.Word ( Word8, Word64 )
+import           Data.Word ( Word8, Word32, Word64 )
 import           Data.Void ( Void )
 import           Text.Printf ( printf )
 
@@ -325,6 +325,15 @@ ppcConcretizeAddresses _mem concretize srcAddr (I i) =
                             , I (D.Instruction D.B (D.Annotated () (D.Directbrtarget off) D.:< D.Nil))
                             ]
                      )
+        D.Annotated R.NoRelocation dest@(D.Gprc _) D.:< _ D.:< D.Annotated (R.SymbolicRelocation symAddr) _ D.:< D.Nil ->
+          -- Handle instructions such as LA where the source is annotated to be a symbolic relocation. In such
+          -- cases, load the concrete address of the symbol in to the destination register
+          -- TODO: Ensure that this works correctly/does not interfere with 64 bit powerpc code
+          let targetAddr :: Word32 = fromIntegral (R.absoluteAddress (concretize symAddr))
+              addrTopBits = targetAddr `shiftR` 16
+              addrLowBits = targetAddr .&. 0xFFFF
+          in I (D.Instruction D.LIS (D.Annotated () dest D.:< D.Annotated () (D.S17imm (fromIntegral addrTopBits)) D.:< D.Nil)) DLN.:|
+             [ I (D.Instruction D.ORI (D.Annotated () dest D.:< D.Annotated () (D.U16imm (fromIntegral addrLowBits)) D.:< D.Annotated () dest D.:< D.Nil)) ]
         D.Annotated (R.PCRelativeRelocation _) (D.Calltarget (D.BT _offset)) D.:< D.Nil ->
           RP.panic RP.PPCISA "ppcConcretizeAddresses" ["Unexpected PCRelativeRelocation: " ++ show opc
                                                       , "  allocated to address: " ++ show srcAddr
