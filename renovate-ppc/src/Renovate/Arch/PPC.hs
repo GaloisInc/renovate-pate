@@ -20,6 +20,10 @@ module Renovate.Arch.PPC (
   disassemble,
   Instruction,
   Operand(..),
+  fromInst,
+  toInst,
+  fromAnnotatedInst,
+  toAnnotatedInst,
 
   -- * Exceptions
   InstructionDisassemblyFailure(..)

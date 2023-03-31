@@ -20,6 +20,8 @@ module Renovate.Arch.PPC.ISA (
   OnlyEncoding,
   fromInst,
   toInst,
+  fromAnnotatedInst,
+  toAnnotatedInst,
   Operand(..),
   PPCRepr(..),
   -- * Exceptions
@@ -550,6 +552,11 @@ fromInst PPCRepr i =
 unannotateOpcode :: D.Annotated a D.Operand tp -> D.Operand tp
 unannotateOpcode (D.Annotated _ op) = op
 
+fromAnnotatedInst :: (arch ~ MP.AnyPPC v) => R.InstructionArchRepr arch tp -> D.AnnotatedInstruction a -> R.Instruction arch tp a
+fromAnnotatedInst PPCRepr = I
+
+toAnnotatedInst :: (arch ~ MP.AnyPPC v) => R.Instruction arch tp a -> D.AnnotatedInstruction a
+toAnnotatedInst = unI
 
 {- Note [Conditional Branch Restrictions]
 
