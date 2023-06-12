@@ -185,8 +185,7 @@ fixPostBSSSectionIds nobitsSections e0
 trailingNobitsSections :: (E.ElfWidthConstraints w) => E.ElfSegment w -> Maybe [E.ElfSection (E.ElfWordType w)]
 trailingNobitsSections seg =
   let (foundBSS, ixs) = go (False, []) (E.ElfDataSegment seg)
-  in if | null ixs && foundBSS -> error "Found a BSS, but the list of nobits sections is empty"
-        | foundBSS -> Just ixs
+  in if | foundBSS -> Just ixs
         | otherwise -> Nothing
   where
     isBSS sec = E.elfSectionName sec == ".bss"
