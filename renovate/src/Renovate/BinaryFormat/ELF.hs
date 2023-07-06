@@ -50,6 +50,7 @@ import           Data.Monoid
 import qualified Data.Ord as O
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
+import qualified Data.Text as T
 import qualified Data.Vector as V
 import           Data.Word ( Word16 )
 import qualified GHC.Stack as Stack
@@ -61,6 +62,7 @@ import           Prelude
 
 import qualified Data.ElfEdit as E
 import qualified Data.Macaw.BinaryLoader as MBL
+import qualified Data.Macaw.Architecture.Info as MAI
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Memory.ElfLoader as MM
 import qualified Data.Macaw.Symbolic as MS
@@ -88,6 +90,10 @@ import qualified Renovate.Recovery as R
 import qualified Renovate.Redirect as RE
 import qualified Renovate.Redirect.Symbolize as RS
 import qualified Renovate.Rewrite as RW
+import qualified Data.Macaw.Architecture.Info as MAI
+import qualified Data.Text as T
+import Control.Lens ((&), (.~))
+
 
 -- | For a given 'E.Elf' file, select the provided configuration that applies to it
 --
@@ -1246,6 +1252,45 @@ instrumentTextSection cfg hdlAlloc loadedBinary textAddrRange textBytes strat la
             let newDataBytes = mkNewDataSection newGlobalBase info
             return (analysisResult, overwrittenBytes, instrumentationBytes, newDataBytes, redirectResult, blockInfo)
 
+incrementInstrStart ::
+  MM.ArchConstraints arch =>
+  MM.ArchAddrWord arch ->
+  MM.Stmt arch ids ->
+  MM.Stmt arch ids
+incrementInstrStart off = \case
+  MM.InstructionStart wd txt -> MM.InstructionStart (wd + off) txt
+  x -> x
+
+addTranslationErrorWrapper ::
+  forall arch.
+  MM.ArchConstraints arch =>
+  Int ->
+  MAI.DisassembleFn arch ->
+  MAI.DisassembleFn arch
+addTranslationErrorWrapper 0 f nonceGen start initSt offset = f nonceGen start initSt offset
+addTranslationErrorWrapper maxDepth f nonceGen start initSt offset  = do
+    (blk,bytesConsumed) <- f nonceGen start initSt offset
+    let totalBytesConsumed = bytesConsumed + MM.addrSize start
+    case MAI.blockTerm blk of
+      MAI.TranslateError nextSt longErr -> let err = T.take 100 longErr in
+        case MM.incSegmentOff start ((fromIntegral totalBytesConsumed)) of
+          Just next -> do
+            let v = MM.CValue (MM.RelocatableCValue (MM.addrWidthRepr next) (MM.segoffAddr next))
+            let nextSt' = nextSt & MM.curIP .~ v
+            (blk',bytesConsumed') <- addTranslationErrorWrapper (maxDepth - 1) f nonceGen next nextSt' (offset - totalBytesConsumed)
+            let
+              stmts' = map (incrementInstrStart (fromIntegral totalBytesConsumed)) (MAI.blockStmts blk')
+              stmts_concat = MAI.blockStmts blk ++ [MM.Comment ("UninterpretedInstruction\n" <> err)] ++ stmts'
+              term = case MAI.blockTerm blk' of
+                MAI.TranslateError nextSt'' longErr' -> let err' = T.take 100 longErr' in
+                  MAI.TranslateError nextSt'' ("Multiple Uninterpreted Instructions: " <> T.pack (show maxDepth) <> "\n" <> err <> "\n" <> err')
+                x -> x
+            return $ (MAI.Block stmts_concat term, bytesConsumed + bytesConsumed')
+          Nothing -> return (blk { MAI.blockTerm = MAI.TranslateError nextSt $ err <> (T.pack $ "\nUnexpected segment end:" <> show start <> " " <> show totalBytesConsumed)}, bytesConsumed)
+      _ -> return (blk,bytesConsumed)
+
+
+
 withAnalysisEnv
   :: forall w arch binFmt callbacks b a lm
      . (w ~ MM.ArchAddrWidth arch
@@ -1272,7 +1317,7 @@ withAnalysisEnv logAction cfg hdlAlloc loadedBinary symmap textAddrRange k = do
   let recovery = R.Recovery { R.recoveryISA = isa
                             , R.recoveryDis = rcDisassembler cfg
                             , R.recoveryAsm = rcAssembler cfg
-                            , R.recoveryArchInfo = archInfo
+                            , R.recoveryArchInfo = archInfo { MAI.disassembleFn = addTranslationErrorWrapper 10 (MAI.disassembleFn archInfo) }
                             , R.recoveryHandleAllocator = hdlAlloc
                             , R.recoveryFuncCallback = fmap (second ($ loadedBinary)) (rcFunctionCallback cfg)
                             , R.recoveryRefinement = rcRefinementConfig cfg

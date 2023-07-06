@@ -24,6 +24,7 @@ module Renovate.Recovery (
   isIncompleteBlockAddress,
   isIncompleteFunction,
   isIncompleteBlock,
+  hasUninterpretedStmts,
   numBlockRegions
   ) where
 
@@ -43,6 +44,7 @@ import qualified Data.Map as M
 import           Data.Maybe ( catMaybes, fromMaybe, isJust, mapMaybe )
 import           Data.Proxy ( Proxy(..) )
 import qualified Data.Set as S
+import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.Encoding.Error as T
 import qualified Data.Traversable as T
@@ -235,7 +237,8 @@ blockInfo recovery mem textAddrRange di = do
                                ]
   -- We collect not only the blocks, but also the addresses of functions
   -- containing untranslatable blocks so that they can be marked as incomplete.
-  (incomp, blocks) <- partitionEithers <$> mapM (blockBuilder blockStarts) (M.elems macawBlocks)
+  (incomp', blocks) <- partitionEithers <$> mapM (blockBuilder blockStarts) (M.elems macawBlocks)
+  let incomp = fst <$> incomp'
   let addBlock m b = M.insert (concreteBlockAddress b) b m
   let blockIndex = F.foldl' addBlock M.empty blocks
   let funcBlocks = M.fromList [ (funcAddr, (mapMaybe (\a -> M.lookup a blockIndex) blockAddrs, PU.Some dfi))
@@ -480,10 +483,11 @@ buildBlock :: (HasCallStack, MC.MemWidth (MC.ArchAddrWidth arch), C.MonadThrow m
            -- ^ Block starts
            -> (MC.ArchSegmentOff arch, PU.Some (MC.ParsedBlock arch))
            -- ^ The macaw block to re-disassemble
-           -> m (Either (MC.ArchSegmentOff arch) (ConcreteBlock arch))
+           -> m (Either (MC.ArchSegmentOff arch, String) (ConcreteBlock arch))
 buildBlock disBlock asm1 mem blockStarts (funcAddr, (PU.Some pb))
-  | MC.blockSize pb == 0 = return (Left funcAddr)
-  | isIncompleteBlock pb = return (Left funcAddr)
+  | MC.blockSize pb == 0 = return (Left (funcAddr, "Block size is zero"))
+  | isIncompleteBlock pb = return (Left (funcAddr, "isIncompleteBlock"))
+  | hasUninterpretedStmts pb = return (Left (funcAddr, "hasUninterpretedStmts"))
   | Just concAddr <- concreteFromSegmentOff mem segAddr = do
       case MC.addrContentsAfter mem (MC.segoffAddr segAddr) of
         Left err -> C.throwM (RCE.MemoryError segAddr err)
@@ -502,9 +506,9 @@ buildBlock disBlock asm1 mem blockStarts (funcAddr, (PU.Some pb))
               withConcreteInstructions bb $ \_repr insns -> do
                 case all (canAssemble asm1) insns of
                   True -> return (Right bb)
-                  False -> return (Left funcAddr)
+                  False -> return (Left (funcAddr, "canAssemble false"))
         _ -> C.throwM (RCE.NoByteRegionAtAddress (MC.segoffAddr segAddr))
-  | otherwise = return (Left funcAddr)
+  | otherwise = return (Left (funcAddr, "otherwise"))
   where
     segAddr = MC.pblockAddr pb
 
@@ -531,7 +535,7 @@ addFunInfoIfIncomplete :: (MC.MemWidth (MC.ArchAddrWidth arch))
                        -> S.Set (ConcreteAddress arch)
                        -> S.Set (ConcreteAddress arch)
 addFunInfoIfIncomplete incompAddrs mem (PU.Some fi) s
-  | isIncompleteFunction fi || S.member (MC.discoveredFunAddr fi) incompAddrs =
+  | isIncompleteFunction fi {- S.member (MC.discoveredFunAddr fi) incompAddrs -}  =
     S.union s (S.fromList blockAddrs)
   | otherwise = s
   where
@@ -551,16 +555,24 @@ isIncompleteFunction fi =
 -- why the analysis of @blk@ was incomplete.
 isIncompleteBlock :: (MC.MemWidth (MC.ArchAddrWidth arch)) => MC.ParsedBlock arch ids -> Bool
 isIncompleteBlock pb =
-  case MC.pblockTermStmt pb of
-    MC.ParsedTranslateError {} -> True
-    MC.ClassifyFailure {} -> True
-    MC.ParsedBranch {} -> False
-    MC.ParsedArchTermStmt {} -> False
-    MC.ParsedReturn {} -> False
-    MC.ParsedLookupTable {} -> False
-    MC.ParsedJump {} -> False
-    MC.ParsedCall {} -> False
-    MC.PLTStub {} -> False
+    case MC.pblockTermStmt pb of
+      MC.ParsedTranslateError {} -> True
+      MC.ClassifyFailure {} -> True
+      MC.ParsedBranch {} -> False
+      MC.ParsedArchTermStmt {} -> False
+      MC.ParsedReturn {} -> False
+      MC.ParsedLookupTable {} -> False
+      MC.ParsedJump {} -> False
+      MC.ParsedCall {} -> False
+      MC.PLTStub {} -> False
+
+hasUninterpretedStmts :: MC.ParsedBlock arch ids -> Bool
+hasUninterpretedStmts pb = any (isUninterpretedStmt) (MC.pblockStmts pb)
+
+isUninterpretedStmt :: MC.Stmt arch ids -> Bool
+isUninterpretedStmt s = case s of
+  MC.Comment str -> T.isPrefixOf (T.pack "UninterpretedInstruction") str
+  _ -> False
 
 {- Note [Unaligned Instructions]
 
