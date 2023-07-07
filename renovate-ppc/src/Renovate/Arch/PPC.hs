@@ -62,7 +62,7 @@ config32 analysis = R.RenovateConfig
   , R.rcDisassembler = disassemble
   , R.rcFunctionCallback = Nothing
   , R.rcAnalysis = analysis
-  , R.rcUpdateSymbolTable = False
+  , R.rcUpdateSymbolTable = True
   -- See Note [Layout Addresses]
   , R.rcDataLayoutBase = 0x20000000
   , R.rcExtratextOffset = 0
@@ -89,7 +89,7 @@ config64 analysis = R.RenovateConfig
   , R.rcDisassembler = disassemble
   , R.rcFunctionCallback = Nothing
   , R.rcAnalysis = analysis
-  , R.rcUpdateSymbolTable = False
+  , R.rcUpdateSymbolTable = True
   -- See Note [Layout Addresses]
   , R.rcDataLayoutBase = 0x20000000
   , R.rcExtratextOffset = 0
