@@ -32,6 +32,7 @@ import           Control.Applicative
 import           Control.Arrow ( second )
 import qualified Control.Lens as L
 import           Control.Monad ( guard, when, unless )
+import qualified Control.Monad.Trans.Except as E
 import qualified Control.Monad.Catch as C
 import qualified Control.Monad.Catch.Pure as P
 import qualified Control.Monad.IO.Class as IO
@@ -93,7 +94,6 @@ import qualified Renovate.Rewrite as RW
 import qualified Data.Macaw.Architecture.Info as MAI
 import qualified Data.Text as T
 import Control.Lens ((&), (.~))
-
 
 -- | For a given 'E.Elf' file, select the provided configuration that applies to it
 --
@@ -1267,27 +1267,52 @@ addTranslationErrorWrapper ::
   Int ->
   MAI.DisassembleFn arch ->
   MAI.DisassembleFn arch
-addTranslationErrorWrapper 0 f nonceGen start initSt offset = f nonceGen start initSt offset
-addTranslationErrorWrapper maxDepth f nonceGen start initSt offset  = do
-    (blk,bytesConsumed) <- f nonceGen start initSt offset
-    let totalBytesConsumed = bytesConsumed + MM.addrSize start
-    case MAI.blockTerm blk of
-      MAI.TranslateError nextSt longErr -> let err = T.take 100 longErr in
-        case MM.incSegmentOff start ((fromIntegral totalBytesConsumed)) of
-          Just next -> do
-            let v = MM.CValue (MM.RelocatableCValue (MM.addrWidthRepr next) (MM.segoffAddr next))
-            let nextSt' = nextSt & MM.curIP .~ v
-            (blk',bytesConsumed') <- addTranslationErrorWrapper (maxDepth - 1) f nonceGen next nextSt' (offset - totalBytesConsumed)
-            let
-              stmts' = map (incrementInstrStart (fromIntegral totalBytesConsumed)) (MAI.blockStmts blk')
-              stmts_concat = MAI.blockStmts blk ++ [MM.Comment ("UninterpretedInstruction\n" <> err)] ++ stmts'
-              term = case MAI.blockTerm blk' of
-                MAI.TranslateError nextSt'' longErr' -> let err' = T.take 100 longErr' in
-                  MAI.TranslateError nextSt'' ("Multiple Uninterpreted Instructions: " <> T.pack (show maxDepth) <> "\n" <> err <> "\n" <> err')
-                x -> x
-            return $ (MAI.Block stmts_concat term, bytesConsumed + bytesConsumed')
-          Nothing -> return (blk { MAI.blockTerm = MAI.TranslateError nextSt $ err <> (T.pack $ "\nUnexpected segment end:" <> show start <> " " <> show totalBytesConsumed)}, bytesConsumed)
-      _ -> return (blk,bytesConsumed)
+addTranslationErrorWrapper maxDepth_ f nonceGen_ start_ initSt_ offset_  = 
+  E.runExceptT (go maxDepth_ nonceGen_ start_ initSt_ offset_) >>= \case
+    Left err -> do
+      (blk,bytesConsumed) <- f nonceGen_ start_ initSt_ offset_
+      -- return the original result, but attach the inner wrapper error
+      let term = case MAI.blockTerm blk of
+            MAI.TranslateError nextSt longInitialError -> let initialError = T.take 100 longInitialError in
+              MAI.TranslateError nextSt (initialError <> T.pack "\nWrapper Errors: \n" <> T.pack err)
+            x -> x
+      return (blk { MAI.blockTerm = term }, bytesConsumed)
+    Right result -> return result
+  where
+    {- go :: Int 
+       -> NonceGenerator (ST s) ids 
+       -> ArchSegmentOff arch 
+       -> RegState (ArchReg arch) (Value arch ids) 
+       -> Int 
+       -> ExceptT String (ST s (Block arch ids, Int)) -}
+    go 0 _nonceGen start _initSt _offset = E.throwE $ "ran out of depth at: " <> show start
+    go maxDepth nonceGen start initSt offset = do
+      (blk,bytesConsumed) <- S.lift $ f nonceGen start initSt offset
+      let totalBytesConsumed = bytesConsumed + MM.addrSize start
+      case MAI.blockTerm blk of
+        -- we wrap the error if there are still bytes left to consume, since we can skip
+        -- over the offending byte and call the disassembler again
+        MAI.TranslateError nextSt longErr -> let err = T.take 100 longErr in
+          case MM.incSegmentOff start ((fromIntegral totalBytesConsumed)) of
+            Just next -> do
+              when ((offset - totalBytesConsumed) <= 0) $
+                E.throwE $ "ran out of bytes at" <> show start <> ":" <> show offset <> "/" <> show totalBytesConsumed
+              let v = MM.CValue (MM.RelocatableCValue (MM.addrWidthRepr next) (MM.segoffAddr next))
+              let nextSt' = nextSt & MM.curIP .~ v
+              -- note that recursive calls can never produce a block that terminates in a translation error
+              -- either this process eventually succeeds in finding a block ending, or it gives up and
+              -- returns the original block
+              
+              (blk',bytesConsumed') <- go (maxDepth - 1) nonceGen next nextSt' (offset - totalBytesConsumed)
+              when ((bytesConsumed' + totalBytesConsumed) > offset) $
+                E.throwE $ "used too many bytes at" <> show start <> ":" <> show offset <> "/" <> show (bytesConsumed' + totalBytesConsumed)
+              let
+                stmts' = map (incrementInstrStart (fromIntegral totalBytesConsumed)) (MAI.blockStmts blk')
+                stmts_concat = MAI.blockStmts blk ++ [MM.Comment ("UninterpretedInstruction\n" <> err)] ++ stmts'
+                term = MAI.blockTerm blk'
+              return $ (MAI.Block stmts_concat term, totalBytesConsumed + bytesConsumed')
+            Nothing -> E.throwE $ "Unexpected segment end:" <> show start <> " " <> show totalBytesConsumed
+        _ -> return (blk,bytesConsumed)
 
 
 

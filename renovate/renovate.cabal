@@ -91,6 +91,7 @@ library
                        parameterized-utils >= 2.0 && < 2.2,
                        semmc,
                        text,
+                       transformers,
                        union-find >= 0.2 && < 0.3,
                        unliftio-core >= 0.2 && < 0.3,
                        vector >= 0.10 && < 0.14,
