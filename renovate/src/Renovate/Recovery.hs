@@ -67,6 +67,9 @@ import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified What4.FunctionName as C
 import qualified What4.ProgramLoc as C
 
+import           Prettyprinter as PP
+import qualified Debug.Trace as Trace
+
 import           Renovate.Core.Address
 import           Renovate.Core.BasicBlock
 import qualified Renovate.Core.Diagnostic as RCD
@@ -150,6 +153,9 @@ analyzeDiscoveredFunctions recovery mem textAddrRange info !iterations =
     Nothing -> return info
     Just (addr, rsn) -> do
       let (info', _someFunInfo) = MC.analyzeFunction addr rsn info
+      -- NOTE: Trace the function discovery process.
+      -- TODO: Ideally this should be a regular log
+      C.viewSome (traceFunctionDiscovery rsn) _someFunInfo
       case recoveryFuncCallback recovery of
         Just (freq, fcb)
           | iterations `mod` freq == 0 -> do
@@ -157,6 +163,13 @@ analyzeDiscoveredFunctions recovery mem textAddrRange info !iterations =
               fcb addr bi
         _ -> return ()
       analyzeDiscoveredFunctions recovery mem textAddrRange info' (iterations + 1)
+  where
+    traceFunctionDiscovery rsn fn = do
+      -- NOTE: This produces large logs due to the pretty printing of the function info at the end
+      --   It is useful for debugging, but could potentially be trimmed for brevity (say, print only
+      --   the address of the function in context).
+      let msg = "Discovered Function : " ++ "Addr: " ++ show (MC.discoveredFunAddr fn) ++ " due to " ++ show rsn ++ ". Context: " ++ show (PP.pretty fn)
+      Trace.traceIO msg
 
 toRegCFG :: forall arch ids
           . (MS.SymArchConstraints arch)
@@ -535,12 +548,25 @@ addFunInfoIfIncomplete :: (MC.MemWidth (MC.ArchAddrWidth arch))
                        -> S.Set (ConcreteAddress arch)
                        -> S.Set (ConcreteAddress arch)
 addFunInfoIfIncomplete incompAddrs mem (PU.Some fi) s
-  | isIncompleteFunction fi {- S.member (MC.discoveredFunAddr fi) incompAddrs -}  =
-    S.union s (S.fromList blockAddrs)
+  | isIncompleteFunction fi {- S.member (MC.discoveredFunAddr fi) incompAddrs -}  = do
+    -- NOTE: When a function contains blocks that are incomplete, *all* blocks belonging
+    --   to the function are skipped during rewrite. Add a trace to indicate that this is
+    --   happening.
+    -- NOTE: Incomplete blocks are represented by a pair (block addr, block size)
+    -- TODO: Ideally this should be a regular log, that involves a bit of circus at the moment
+    traceFailedFunction (S.union s (S.fromList blockAddrs))
   | otherwise = s
   where
     pbs = fi L.^. MC.parsedBlocks
     blockAddrs = mapMaybe (concreteFromSegmentOff mem) (M.keys pbs)
+    failedBlockAddrs finfo = do 
+      let blocks = filter isIncompleteBlock (M.elems (finfo L.^. MC.parsedBlocks))
+      map (\b -> (MC.pblockAddr b, MC.blockSize b)) blocks
+    allBlockAddrs finfo = map MC.pblockAddr (M.elems (finfo L.^. MC.parsedBlocks))
+    funcDesc finfo = "Function @ " ++ show (MC.discoveredFunAddr finfo) ++ " All Blocks: " ++ show (allBlockAddrs finfo)
+    traceFailedFunction result =
+      let msg = "Incomplete " ++ funcDesc fi ++ " due to incomplete blocks " ++ show (failedBlockAddrs fi) ++ ". All blocks skipped!"
+      in Trace.trace msg result
 
 -- | Use 'isIncompleteFunction' to determine if particular function
 -- has been fully analyzed or if the analysis was incomplete for any
