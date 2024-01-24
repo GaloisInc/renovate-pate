@@ -334,6 +334,25 @@ ppcConcretizeAddresses _mem concretize srcAddr (I i) =
               addrLowBits = targetAddr .&. 0xFFFF
           in I (D.Instruction D.LIS (D.Annotated () dest D.:< D.Annotated () (D.S17imm (fromIntegral addrTopBits)) D.:< D.Nil)) DLN.:|
              [ I (D.Instruction D.ORI (D.Annotated () dest D.:< D.Annotated () (D.U16imm (fromIntegral addrLowBits)) D.:< D.Annotated () dest D.:< D.Nil)) ]
+        D.Annotated R.NoRelocation (D.Gprc destReg) D.:< D.Annotated (R.SymbolicRelocation symAddr) (D.S16imm _) D.:< D.Nil ->
+          -- Handle instructions such as LI where the source is annotated with a relocation. In such
+          -- cases, generate code to load the runtime address of the symbol in to the destination register.
+          let tempReg = if destReg == D.GPR 10 then D.GPR 11 else D.GPR 10  -- Arbitrarily chosen, but non-conflicting!
+              targetAddr = concretize symAddr
+              offset  = computeOffset 3 targetAddr  -- NOTE: 3 instructions have to execute before we reach the PC we computed
+          -- 1. We need a temporary register to work with. Temporarily store it on stack (we elide actually updating the stack
+          --    pointer as that is unnecessary for our purposes)
+          in I (D.Instruction D.STW (D.Annotated () (D.Memri (D.MemRI (Just (D.GPR 1)) (-4))) D.:< D.Annotated () (D.Gprc tempReg) D.:< D.Nil)) DLN.:|
+             concat [
+               -- 2. Then compute the address of the next instruction
+               computeNextInstructionAddress destReg tempReg
+               -- 3. Load the offset in to the temp register
+               , loadImmediate32 tempReg offset
+               -- 4. Compute the in-memory address
+               , [ I (D.Instruction D.ADD4 (D.Annotated () (D.Gprc destReg) D.:< D.Annotated () (D.Gprc destReg) D.:< D.Annotated () (D.Gprc tempReg) D.:< D.Nil)) ]
+               -- 5. Restore the temp register
+               , [ I (D.Instruction D.LWZ (D.Annotated () (D.Gprc tempReg) D.:<  D.Annotated () (D.Memri (D.MemRI (Just (D.GPR 1)) (-4))) D.:< D.Nil)) ]
+             ]
         D.Annotated (R.PCRelativeRelocation _) (D.Calltarget (D.BT _offset)) D.:< D.Nil ->
           RP.panic RP.PPCISA "ppcConcretizeAddresses" ["Unexpected PCRelativeRelocation: " ++ show opc
                                                       , "  allocated to address: " ++ show srcAddr
@@ -364,6 +383,33 @@ ppcConcretizeAddresses _mem concretize srcAddr (I i) =
     absoluteOff n addr = case newJumpOffset 26 (R.addressAddOffset srcAddr (4*n)) addr of
       Left err -> die err
       Right off4 -> D.BT (off4 `shiftR` 2)
+    -- This @n@ is the index of the generated instruction that the computed offset
+    -- will be used from.  For example, if the offset will be used in the first
+    -- instruction then @n = 0@.  If it is to be used in the third instruction, @n = 2@.
+    computeOffset :: MM.MemWord (MM.ArchAddrWidth arch) -> R.ConcreteAddress arch -> Integer
+    computeOffset n targetAddr = 
+      let offsettedBase = R.addressAddOffset srcAddr (4 * n)
+          rawDiff = targetAddr `R.addressDiff` offsettedBase
+      in rawDiff
+    -- Instructions to load a 32-bit intermediate value in to a register
+    loadImmediate32 dest value =
+      let valueHigh = value `shiftR` 16
+          valueLow  = value .&. 0xFFFF
+      in [ I (D.Instruction D.LIS (D.Annotated () (D.Gprc dest) D.:< D.Annotated () (D.S17imm (fromIntegral valueHigh)) D.:< D.Nil))
+         , I (D.Instruction D.ORI (D.Annotated () (D.Gprc dest) D.:< D.Annotated () (D.U16imm (fromIntegral valueLow)) D.:< D.Annotated () (D.Gprc dest) D.:< D.Nil)) 
+         ]
+    -- Instructions to compute where we are in the program (i.e. the PC)
+    -- We assume that we can use the two registers passed to this function freely
+    -- NOTE: In PPC, branch offsets are left shifted by 2 before being used. So offset
+    --       1 implies jumping to 4-bytes after the current instruction (i.e. the next
+    --       instruction). Consequently this stores the address of the *next* instruction
+    --       in the dest register  
+    computeNextInstructionAddress destReg tempReg = 
+      [ I (D.Instruction D.MFLR (D.Annotated () (D.Gprc tempReg) D.:< D.Nil)) 
+      , I (D.Instruction D.BL (D.Annotated () (D.Calltarget (D.BT 1)) D.:< D.Nil))
+      , I (D.Instruction D.MFLR (D.Annotated () (D.Gprc destReg) D.:< D.Nil))
+      , I (D.Instruction D.MTLR (D.Annotated () (D.Gprc tempReg) D.:< D.Nil))
+      ]
 
 
 -- | This function records the real addresses of IP-relative addressing operands.
