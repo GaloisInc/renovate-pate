@@ -1258,7 +1258,7 @@ incrementInstrStart ::
   MM.Stmt arch ids ->
   MM.Stmt arch ids
 incrementInstrStart off = \case
-  MM.InstructionStart wd txt -> MM.InstructionStart (wd + off) txt
+  MM.InstructionStart wd txt i -> MM.InstructionStart (wd + off) txt i
   x -> x
 
 addTranslationErrorWrapper ::
